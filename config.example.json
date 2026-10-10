@@ -1,0 +1,23 @@
+{
+  "config_version": "1",
+  "mode": "demo",
+  "listen": "127.0.0.1:8787",
+  "data_dir": "var/griffin",
+  "quote": "USDC",
+  "universe": ["SOL", "BTC", "ETH"],
+  "dataset": "fixtures/synthetic/majors.json",
+  "starting_cash": 1000000,
+  "fee_bps": 1,
+  "slippage_bps": 2,
+  "strategy": {
+    "name": "school-griffin-1",
+    "fast": 8,
+    "slow": 21,
+    "max_position_pct": 0.2
+  },
+  "safety": {
+    "max_notional": 250000,
+    "max_spread_bps": 25,
+    "min_liquidity_usd": 1000000
+  }
+}

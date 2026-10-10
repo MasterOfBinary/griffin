@@ -1,0 +1,7 @@
+/bin/
+/var/
+/fixtures/recorded/*
+!/fixtures/recorded/.gitkeep
+*.db
+*.sqlite
+*.sqlite3
