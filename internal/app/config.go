@@ -1,6 +1,8 @@
 package app
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -12,7 +14,7 @@ import (
 )
 
 // Config is the versioned paper-lab configuration.
-// config_version is part of the run id: bump it when the settings change.
+// Research settings are hashed into the run id. Listen address and data directory are not.
 type Config struct {
 	ConfigVersion string         `json:"config_version"`
 	Mode          string         `json:"mode"`
@@ -38,7 +40,7 @@ type StrategyConfig struct {
 
 var versionPattern = regexp.MustCompile(`^[a-z0-9._-]{1,32}$`)
 
-// LoadConfig reads a JSON config and validates it.
+// LoadConfig reads a JSON config. Call Validate after CLI overrides are applied.
 func LoadConfig(path string) (Config, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -51,10 +53,39 @@ func LoadConfig(path string) (Config, error) {
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		return Config{}, fmt.Errorf("parse config: %w", err)
 	}
-	if err := cfg.Validate(); err != nil {
-		return Config{}, err
-	}
 	return cfg, nil
+}
+
+// Fingerprint hashes the research settings. Listen address and data directory are excluded
+// so opening the UI does not mint a new run id.
+func (c Config) Fingerprint() (string, error) {
+	body := struct {
+		ConfigVersion string         `json:"config_version"`
+		Mode          string         `json:"mode"`
+		Quote         string         `json:"quote"`
+		Universe      []string       `json:"universe"`
+		StartingCash  float64        `json:"starting_cash"`
+		FeeBps        float64        `json:"fee_bps"`
+		SlippageBps   float64        `json:"slippage_bps"`
+		Strategy      StrategyConfig `json:"strategy"`
+		Safety        safety.Limits  `json:"safety"`
+	}{
+		ConfigVersion: c.ConfigVersion,
+		Mode:          c.Mode,
+		Quote:         c.Quote,
+		Universe:      append([]string(nil), c.Universe...),
+		StartingCash:  c.StartingCash,
+		FeeBps:        c.FeeBps,
+		SlippageBps:   c.SlippageBps,
+		Strategy:      c.Strategy,
+		Safety:        c.Safety,
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 // Validate checks the closed universe, the listen address, and the strategy parameters.

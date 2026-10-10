@@ -21,7 +21,49 @@ type Bar struct {
 	Close        float64 `json:"close"`
 	Volume       float64 `json:"volume"`
 	SpreadBps    float64 `json:"spread_bps"`
+	SpreadKnown  bool    `json:"-"`
 	LiquidityUSD float64 `json:"liquidity_usd"`
+}
+
+// UnmarshalJSON records whether spread_bps was present. A missing field stays unknown
+// so strict mode cannot treat it as a zero spread.
+func (b *Bar) UnmarshalJSON(data []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	type plain struct {
+		Symbol       string  `json:"symbol"`
+		Ts           int64   `json:"ts"`
+		Open         float64 `json:"open"`
+		High         float64 `json:"high"`
+		Low          float64 `json:"low"`
+		Close        float64 `json:"close"`
+		Volume       float64 `json:"volume"`
+		LiquidityUSD float64 `json:"liquidity_usd"`
+	}
+	var decoded plain
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	bar := Bar{
+		Symbol:       decoded.Symbol,
+		Ts:           decoded.Ts,
+		Open:         decoded.Open,
+		High:         decoded.High,
+		Low:          decoded.Low,
+		Close:        decoded.Close,
+		Volume:       decoded.Volume,
+		LiquidityUSD: decoded.LiquidityUSD,
+	}
+	if spread, ok := raw["spread_bps"]; ok && string(spread) != "null" {
+		if err := json.Unmarshal(spread, &bar.SpreadBps); err != nil {
+			return fmt.Errorf("spread_bps: %w", err)
+		}
+		bar.SpreadKnown = true
+	}
+	*b = bar
+	return nil
 }
 
 // Dataset is a named collection of bars plus the hash of the bytes that were loaded.
@@ -89,7 +131,6 @@ func Validate(bars []Bar) error {
 		return fmt.Errorf("dataset has no bars")
 	}
 	last := map[string]int64{}
-	seen := map[string]int{}
 	for _, bar := range bars {
 		if bar.Symbol == "" {
 			return fmt.Errorf("bar missing symbol")
@@ -101,7 +142,6 @@ func Validate(bars []Bar) error {
 			return fmt.Errorf("%s timestamps are not strictly increasing", bar.Symbol)
 		}
 		last[bar.Symbol] = bar.Ts
-		seen[bar.Symbol]++
 		if err := validateOHLC(bar); err != nil {
 			return err
 		}

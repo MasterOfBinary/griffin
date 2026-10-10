@@ -23,15 +23,12 @@ func (v Violation) String() string {
 }
 
 // Scan walks root and returns every forbidden path match outside the denylist file.
+// Output directories are not skipped: a forbidden file must not hide under bin, var, or vendor.
 func Scan(root string) ([]Violation, error) {
 	patterns := Patterns()
 	lower := make([]string, len(patterns))
 	for i, pat := range patterns {
 		lower[i] = strings.ToLower(pat)
-	}
-	banned := map[string]bool{}
-	for _, name := range BannedNames() {
-		banned[name] = true
 	}
 	var out []Violation
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -39,8 +36,7 @@ func Scan(root string) ([]Violation, error) {
 			return err
 		}
 		if d.IsDir() {
-			switch d.Name() {
-			case ".git", "bin", "var", "vendor":
+			if d.Name() == ".git" {
 				return filepath.SkipDir
 			}
 			return nil
@@ -49,7 +45,7 @@ func Scan(root string) ([]Violation, error) {
 		if strings.HasSuffix(slash, "internal/forbid/denylist.go") {
 			return nil
 		}
-		if banned[d.Name()] {
+		if bannedFilename(d.Name()) {
 			out = append(out, Violation{Path: path, Line: 1, Pattern: d.Name()})
 			return nil
 		}
@@ -69,9 +65,25 @@ func Scan(root string) ([]Violation, error) {
 	return out, nil
 }
 
+// bannedFilename reports container and frontend manifests, including prefixed and suffixed names.
+func bannedFilename(name string) bool {
+	lower := strings.ToLower(name)
+	if lower == "dockerfile" || strings.HasPrefix(lower, "dockerfile.") {
+		return true
+	}
+	if lower == "compose.yaml" || lower == "compose.yml" || strings.HasPrefix(lower, "docker-compose") {
+		return true
+	}
+	if lower == "package.json" || lower == "package-lock.json" {
+		return true
+	}
+	return false
+}
+
 func textFile(path string) bool {
 	switch strings.ToLower(filepath.Ext(path)) {
-	case ".go", ".md", ".json", ".mod", ".sum", ".yml", ".yaml", ".txt":
+	case ".go", ".md", ".json", ".mod", ".sum", ".yml", ".yaml", ".txt",
+		".sh", ".py", ".js", ".mjs", ".env", ".ts":
 		return true
 	}
 	switch filepath.Base(path) {
@@ -94,16 +106,18 @@ func scanFile(path string, patterns []string) ([]Violation, error) {
 	for {
 		line, err := reader.ReadString('\n')
 		if len(line) > 0 {
-			if strings.ContainsRune(line, '\x00') {
-				return nil, nil
-			}
-			folded := strings.ToLower(line)
+			binary := strings.ContainsRune(line, '\x00')
+			folded := strings.ToLower(strings.ReplaceAll(line, "\x00", ""))
 			for i, pat := range patterns {
 				if strings.Contains(folded, pat) {
 					out = append(out, Violation{Path: path, Line: lineNo, Pattern: Patterns()[i]})
 				}
 			}
 			lineNo++
+			if binary {
+				// Keep matches already found. Do not keep scanning a binary tail.
+				return out, nil
+			}
 		}
 		if err == io.EOF {
 			return out, nil

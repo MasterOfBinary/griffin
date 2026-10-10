@@ -30,4 +30,4 @@ A signal is not filled on the signal bar. In `demo`, and in `strict` when the bo
 
 ## What this strategy does not do
 
-It does not size from borrowed funds, it does not short, and it does not look outside the three majors. Parameter changes belong in a new `config_version` so the run id changes with the research claim.
+It does not size from borrowed funds, it does not short, and it does not look outside the three majors. Parameter changes are part of the run id. Bump `config_version` when the research claim changes so the id prefix stays readable.

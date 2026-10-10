@@ -30,7 +30,7 @@ func TestPageShowsModesAndRun(t *testing.T) {
 	if !strings.Contains(body, "127.0.0.1:8787") {
 		t.Fatalf("index missing bind address\n%s", body)
 	}
-	id, err := store.RunID("demo", "1", "hash")
+	id, err := store.RunID("demo", "1", "hash", "fp")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +44,7 @@ func TestPageShowsModesAndRun(t *testing.T) {
 	if !strings.Contains(detail, "No paper fills in this run.") {
 		t.Fatal("expected the empty fill state for this seeded demo row")
 	}
-	strictID, err := store.RunID("strict", "1", "hash")
+	strictID, err := store.RunID("strict", "1", "hash", "fp")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,9 +55,59 @@ func TestPageShowsModesAndRun(t *testing.T) {
 }
 
 func TestServeRefusesNonLoopback(t *testing.T) {
-	err := Serve(context.Background(), "0.0.0.0:8787", http.NewServeMux())
+	_, err := Listen("0.0.0.0:8787")
 	if err == nil || !strings.Contains(err.Error(), "refusing") {
 		t.Fatalf("got %v", err)
+	}
+}
+
+func TestListenReportsBoundPort(t *testing.T) {
+	ln, err := Listen("127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	bound := ln.Addr().String()
+	if strings.HasSuffix(bound, ":0") || !strings.HasPrefix(bound, "127.0.0.1:") {
+		t.Fatalf("bound address %s", bound)
+	}
+}
+
+func TestRejectsRebindingHost(t *testing.T) {
+	h := New(emptyStore(t), "127.0.0.1:8787")
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Host = "evil.example"
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status %d body %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestReloadsRunsWrittenAfterOpen(t *testing.T) {
+	dir := t.TempDir()
+	st := emptyStoreIn(t, dir)
+	h := New(st, "127.0.0.1:8787")
+	later, err := store.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := store.RunID("demo", "1", "hash", "fp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := later.Finish(store.Run{
+		ID: id, Mode: "demo", ConfigVersion: "1", DatasetHash: "hash",
+		Status: store.StatusFinished, StrategyName: "school-griffin-1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Host = "127.0.0.1"
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), id) {
+		t.Fatalf("status %d body %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -65,21 +115,26 @@ func TestServeLoopback(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	addr := freeLoopback(t)
-	h := New(emptyStore(t), addr)
+	ln, err := Listen(addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bound := ln.Addr().String()
+	h := New(emptyStore(t), bound)
 	errCh := make(chan error, 1)
-	go func() { errCh <- Serve(ctx, addr, h) }()
+	go func() { errCh <- Serve(ctx, ln, h) }()
 
 	deadline := time.Now().Add(2 * time.Second)
 	var last error
 	for time.Now().Before(deadline) {
-		resp, err := http.Get("http://" + addr + "/healthz")
+		resp, err := http.Get("http://" + bound + "/healthz")
 		if err == nil {
 			body, readErr := io.ReadAll(resp.Body)
 			resp.Body.Close()
 			if readErr != nil {
 				t.Fatal(readErr)
 			}
-			if !strings.Contains(string(body), "listen="+addr) {
+			if !strings.Contains(string(body), "listen="+bound) {
 				t.Fatalf("healthz %s", body)
 			}
 			cancel()
@@ -103,7 +158,7 @@ func seed(t *testing.T) *store.Store {
 	t.Helper()
 	st := emptyStore(t)
 	for _, mode := range []string{"demo", "signal_only", "strict"} {
-		id, err := store.RunID(mode, "1", "hash")
+		id, err := store.RunID(mode, "1", "hash", "fp")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -131,7 +186,12 @@ func seed(t *testing.T) *store.Store {
 
 func emptyStore(t *testing.T) *store.Store {
 	t.Helper()
-	st, err := store.Open(t.TempDir())
+	return emptyStoreIn(t, t.TempDir())
+}
+
+func emptyStoreIn(t *testing.T, dir string) *store.Store {
+	t.Helper()
+	st, err := store.Open(dir)
 	if err != nil {
 		t.Fatal(err)
 	}

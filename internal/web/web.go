@@ -14,16 +14,20 @@ import (
 	"github.com/MasterOfBinary/griffin/internal/store"
 )
 
-// Serve listens on addr and serves h until ctx is cancelled.
-// A non-loopback addr is refused before the socket opens.
-func Serve(ctx context.Context, addr string, h http.Handler) error {
+// Listen opens a loopback socket. The returned address is the bound port, including when addr used port 0.
+func Listen(addr string) (net.Listener, error) {
 	if err := safety.ValidateListen(addr); err != nil {
-		return err
+		return nil, err
 	}
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
-		return fmt.Errorf("listen %s: %w", addr, err)
+		return nil, fmt.Errorf("listen %s: %w", addr, err)
 	}
+	return ln, nil
+}
+
+// Serve serves h on an already-bound listener until ctx is cancelled.
+func Serve(ctx context.Context, ln net.Listener, h http.Handler) error {
 	srv := &http.Server{Handler: h, ReadHeaderTimeout: 5 * time.Second}
 	errCh := make(chan error, 1)
 	go func() {
@@ -51,7 +55,23 @@ func New(st *store.Store, listen string) http.Handler {
 	mux.HandleFunc("GET /healthz", h.health)
 	mux.HandleFunc("GET /runs/{id}", h.detail)
 	mux.HandleFunc("GET /", h.index)
-	return mux
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !loopbackHost(r.Host) {
+			http.Error(w, "refusing non-loopback host", http.StatusForbidden)
+			return
+		}
+		mux.ServeHTTP(w, r)
+	})
+}
+
+// loopbackHost rejects names so a rebinding name cannot call the local UI.
+func loopbackHost(hostport string) bool {
+	host := hostport
+	if parsed, _, err := net.SplitHostPort(hostport); err == nil {
+		host = parsed
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 type handler struct {
@@ -74,11 +94,19 @@ type page struct {
 }
 
 func (h *handler) health(w http.ResponseWriter, r *http.Request) {
+	if err := h.store.Reload(); err != nil {
+		http.Error(w, "store unavailable", http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	fmt.Fprintf(w, "ok\nlisten=%s\n", h.listen)
 }
 
 func (h *handler) index(w http.ResponseWriter, r *http.Request) {
+	if err := h.store.Reload(); err != nil {
+		http.Error(w, "store unavailable", http.StatusInternalServerError)
+		return
+	}
 	h.render(w, "index", page{
 		Listen: h.listen,
 		Modes:  modeViews(""),
@@ -87,6 +115,10 @@ func (h *handler) index(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) detail(w http.ResponseWriter, r *http.Request) {
+	if err := h.store.Reload(); err != nil {
+		http.Error(w, "store unavailable", http.StatusInternalServerError)
+		return
+	}
 	id := r.PathValue("id")
 	run, ok := h.store.Get(id)
 	if !ok {
@@ -122,16 +154,14 @@ func mustTemplate() *template.Template {
 		"redact": safety.Redact,
 		"f2":     func(v float64) string { return fmt.Sprintf("%.2f", v) },
 		"f4":     func(v float64) string { return fmt.Sprintf("%.4f", v) },
-	}).Parse(indexHTML + detailHTML))
+	}).Parse(pageCSS + indexHTML + detailHTML))
 }
 
-const indexHTML = `
-{{define "index"}}
-<!DOCTYPE html>
-<html lang="en">
+const pageCSS = `
+{{define "head"}}
 <head>
   <meta charset="utf-8">
-  <title>Griffin paper lab</title>
+  <title>{{.}}</title>
   <style>
     body { font-family: Georgia, "Iowan Old Style", serif; margin: 2rem auto; max-width: 960px; color: #1c1915; background: #f6f1e7; padding: 0 1rem; }
     h1 { font-weight: 500; margin-bottom: 0.25rem; }
@@ -143,9 +173,17 @@ const indexHTML = `
     table { border-collapse: collapse; width: 100%; }
     th, td { border-bottom: 1px solid #d9c7a3; text-align: left; padding: 0.4rem; vertical-align: top; }
     a { color: #1c1915; }
-    code { font-family: ui-monospace, monospace; }
+    code, .mono { font-family: ui-monospace, monospace; }
   </style>
 </head>
+{{end}}
+`
+
+const indexHTML = `
+{{define "index"}}
+<!DOCTYPE html>
+<html lang="en">
+{{template "head" "Griffin paper lab"}}
 <body>
   <h1>Griffin</h1>
   <p>Paper-trading proving ground for liquid majors.</p>
@@ -181,23 +219,7 @@ const detailHTML = `
 {{define "detail"}}
 <!DOCTYPE html>
 <html lang="en">
-<head>
-  <meta charset="utf-8">
-  <title>Griffin {{.Run.Mode}}</title>
-  <style>
-    body { font-family: Georgia, "Iowan Old Style", serif; margin: 2rem auto; max-width: 960px; color: #1c1915; background: #f6f1e7; padding: 0 1rem; }
-    h1 { font-weight: 500; }
-    .banner, .modes, table { margin: 1rem 0; }
-    .banner { padding: 0.75rem 1rem; background: #efe4cf; border: 1px solid #d9c7a3; }
-    .modes { display: flex; gap: 0.5rem; list-style: none; padding: 0; }
-    .modes li { padding: 0.15rem 0.55rem; border: 1px solid #1c1915; font-family: ui-monospace, monospace; }
-    .modes li.active { background: #1c1915; color: #f6f1e7; }
-    table { border-collapse: collapse; width: 100%; }
-    th, td { border-bottom: 1px solid #d9c7a3; text-align: left; padding: 0.4rem; vertical-align: top; }
-    a { color: #1c1915; }
-    code, .mono { font-family: ui-monospace, monospace; }
-  </style>
-</head>
+{{template "head" (printf "Griffin %s" .Run.Mode)}}
 <body>
   <p><a href="/">All runs</a></p>
   <h1>{{.Run.StrategyName}}</h1>

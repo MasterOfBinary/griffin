@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/MasterOfBinary/griffin/internal/candles"
+	"github.com/MasterOfBinary/griffin/internal/repotest"
 	"github.com/MasterOfBinary/griffin/internal/store"
 )
 
@@ -81,7 +82,7 @@ func TestCLIModesAndFinishedRerun(t *testing.T) {
 }
 
 func TestStrictHaltRefusesRerun(t *testing.T) {
-	root := repoRoot(t)
+	root := repotest.Root(t)
 	cfg, err := LoadConfig(filepath.Join(root, "config.example.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -191,7 +192,7 @@ func cmd(t *testing.T, dir string, command ...string) []string {
 
 func configPath(t *testing.T) string {
 	t.Helper()
-	return filepath.Join(repoRoot(t), "config.example.json")
+	return filepath.Join(repotest.Root(t), "config.example.json")
 }
 
 func wideSpreadFixture(t *testing.T, src string) string {
@@ -235,20 +236,124 @@ func freeLoopback(t *testing.T) string {
 	return addr
 }
 
-func repoRoot(t *testing.T) string {
-	t.Helper()
-	dir, err := os.Getwd()
+func TestRunRequiresMode(t *testing.T) {
+	dir := t.TempDir()
+	err := Execute(context.Background(), []string{"run", "--once", "--config", configPath(t), "--data-dir", dir}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "--mode") {
+		t.Fatalf("got %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "runs.json")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("store stat: %v", statErr)
+	}
+}
+
+func TestListenOverrideValidatedAfterFlags(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bad-listen.json")
+	raw, err := os.ReadFile(configPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
-	for {
-		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
-			return dir
+	updated := strings.Replace(string(raw), "127.0.0.1:8787", "0.0.0.0:8787", 1)
+	fixture := filepath.Join(repotest.Root(t), "fixtures", "synthetic", "majors.json")
+	updated = strings.Replace(updated, "fixtures/synthetic/majors.json", fixture, 1)
+	if !strings.Contains(updated, "0.0.0.0:8787") || !strings.Contains(updated, fixture) {
+		t.Fatal("example config was not rewritten")
+	}
+	if err := os.WriteFile(path, []byte(updated), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err = Execute(context.Background(), []string{"demo", "--once", "--config", path, "--data-dir", dir}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "refusing") {
+		t.Fatalf("file listen should fail before an override: %v", err)
+	}
+	if err := Execute(context.Background(), []string{"demo", "--once", "--config", path, "--data-dir", dir, "--listen", "127.0.0.1:9"}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDemoServesFinishedRun(t *testing.T) {
+	dir := t.TempDir()
+	if !strings.Contains(mustRun(t, dir, "demo"), "serve: skipped") {
+		t.Fatal("expected --once to skip the UI")
+	}
+	addr := freeLoopback(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var buf bytes.Buffer
+	errCh := make(chan error, 1)
+	args := []string{"demo", "--config", configPath(t), "--data-dir", dir, "--listen", addr}
+	go func() {
+		errCh <- Execute(ctx, args, &buf)
+	}()
+	deadline := time.Now().Add(3 * time.Second)
+	var body string
+	var last error
+	for time.Now().Before(deadline) {
+		resp, err := http.Get("http://" + addr + "/")
+		if err == nil {
+			raw, readErr := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			body = string(raw)
+			break
 		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			t.Fatal("go.mod not found")
-		}
-		dir = parent
+		last = err
+		time.Sleep(20 * time.Millisecond)
+	}
+	if body == "" {
+		t.Fatal(last)
+	}
+	cancel()
+	if err := <-errCh; err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "serve: existing finished run") || !strings.Contains(out, "listening: http://"+addr) {
+		t.Fatalf("cli output:\n%s", out)
+	}
+	if !strings.Contains(body, "demo-v1-") {
+		t.Fatalf("page missing finished run:\n%s", body)
+	}
+}
+
+func TestFingerprintIgnoresListen(t *testing.T) {
+	cfg, err := LoadConfig(configPath(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, err := cfg.Fingerprint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Listen = "127.0.0.1:1"
+	cfg.DataDir = t.TempDir()
+	same, err := cfg.Fingerprint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if base != same {
+		t.Fatalf("placement changed the fingerprint: %s vs %s", base, same)
+	}
+	cfg.FeeBps += 4
+	changed, err := cfg.Fingerprint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed == base {
+		t.Fatal("fee change left the fingerprint unchanged")
+	}
+	id1, err := store.RunID(cfg.Mode, cfg.ConfigVersion, "abc", base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id2, err := store.RunID(cfg.Mode, cfg.ConfigVersion, "abc", changed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id1 == id2 {
+		t.Fatal("config change did not change the run id")
 	}
 }

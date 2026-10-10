@@ -36,24 +36,50 @@ func TestListenLoopbackOnly(t *testing.T) {
 }
 
 func TestStrictSpread(t *testing.T) {
-	bar := candles.Bar{Symbol: "SOL", SpreadBps: 80, LiquidityUSD: 5_000_000}
+	bar := candles.Bar{Symbol: "SOL", SpreadBps: 80, SpreadKnown: true, LiquidityUSD: 5_000_000}
 	err := CheckBar(bar, Limits{MaxSpreadBps: 25, MinLiquidityUSD: 1_000_000})
 	if err == nil {
 		t.Fatal("expected spread failure")
+	}
+	missing := candles.Bar{Symbol: "SOL", SpreadBps: 0, LiquidityUSD: 5_000_000}
+	if err := CheckBar(missing, Limits{MaxSpreadBps: 25, MinLiquidityUSD: 1_000_000}); err == nil {
+		t.Fatal("expected missing spread to fail")
+	}
+	negative := candles.Bar{Symbol: "SOL", SpreadBps: -1, SpreadKnown: true, LiquidityUSD: 5_000_000}
+	if err := CheckBar(negative, Limits{MaxSpreadBps: 25, MinLiquidityUSD: 1_000_000}); err == nil {
+		t.Fatal("expected negative spread to fail")
+	}
+	zero := candles.Bar{Symbol: "SOL", SpreadBps: 0, SpreadKnown: true, LiquidityUSD: 5_000_000}
+	if err := CheckBar(zero, Limits{MaxSpreadBps: 25, MinLiquidityUSD: 1_000_000}); err != nil {
+		t.Fatal(err)
 	}
 }
 
 func TestRedactKeyMaterial(t *testing.T) {
 	secret := "abcdEFGHijklMNOPqrstUVWX1234567890"
-	raw := "api" + "_key=" + secret
-	if !ContainsKeyMaterial(raw) {
-		t.Fatal("expected detector to match")
+	plain := `{"config_version":"1","mode":"demo","fee_bps":1}`
+	if ContainsKeyMaterial(plain) || Redact(plain) != plain {
+		t.Fatalf("plain config was treated as key material: %s", Redact(plain))
 	}
-	out := Redact(raw)
-	if strings.Contains(out, secret) {
-		t.Fatalf("secret leaked: %s", out)
+	samples := []string{
+		"api" + "_key=" + secret,
+		`{"` + "private" + "_key" + `": "` + secret + ` extra"}`,
+		"SECRET" + "_KEY=" + secret,
+		"client_secret=" + secret,
+		"AWS_" + "SECRET" + "_ACCESS_KEY=" + secret,
+		"-----BEGIN " + "PRIVATE" + " KEY-----\n" + secret + "\n-----END " + "PRIVATE" + " KEY-----",
+		"mnemonic: " + secret + " secondword thirdword",
 	}
-	if !strings.Contains(out, "[redacted]") {
-		t.Fatalf("redacted output %q", out)
+	for _, raw := range samples {
+		if !ContainsKeyMaterial(raw) {
+			t.Fatalf("expected detector to match %q", raw)
+		}
+		out := Redact(raw)
+		if strings.Contains(out, secret) || strings.Contains(out, "secondword") || strings.Contains(out, "thirdword") {
+			t.Fatalf("secret leaked from %q into %q", raw, out)
+		}
+		if !strings.Contains(out, "[redacted]") {
+			t.Fatalf("redacted output %q", out)
+		}
 	}
 }

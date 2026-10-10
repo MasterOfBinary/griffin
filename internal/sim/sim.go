@@ -119,18 +119,31 @@ func apply(bar candles.Bar, side string, cash, qty, avg float64, cfg Config) (Fi
 	switch side {
 	case "buy":
 		px := bar.Open * (1 + cfg.SlippageBps/10000)
-		notional := cash * cfg.MaxPositionPct
-		if cfg.MaxNotional > 0 && notional > cfg.MaxNotional {
-			notional = cfg.MaxNotional
+		if cfg.FeeBps < 0 {
+			return Fill{}, cash, qty, avg, fmt.Errorf("negative fee")
 		}
-		if px <= 0 || notional <= 0 {
+		if px <= 0 || cash <= 0 {
+			return Fill{}, cash, qty, avg, nil
+		}
+		// The fee is paid from the position budget, so pct=1 still fits in cash.
+		feeRate := cfg.FeeBps / 10000
+		budget := cash * cfg.MaxPositionPct
+		if cfg.MaxNotional > 0 && budget > cfg.MaxNotional {
+			budget = cfg.MaxNotional
+		}
+		if budget > cash {
+			budget = cash
+		}
+		notional := budget / (1 + feeRate)
+		fee := notional * feeRate
+		if notional+fee > cash {
+			notional = cash / (1 + feeRate)
+			fee = cash - notional
+		}
+		if notional <= 0 {
 			return Fill{}, cash, qty, avg, nil
 		}
 		q := notional / px
-		fee := notional * cfg.FeeBps / 10000
-		if notional+fee > cash {
-			return Fill{}, cash, qty, avg, fmt.Errorf("insufficient paper cash for %s", bar.Symbol)
-		}
 		return Fill{
 			Symbol: bar.Symbol, Ts: bar.Ts, Side: "buy", Qty: q, Price: px, Fee: fee,
 			Reason: "paper fill at next open",

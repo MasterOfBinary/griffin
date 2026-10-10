@@ -37,7 +37,14 @@ type Limits struct {
 }
 
 // CheckBar reports whether a bar is eligible for a strict paper run.
+// A missing spread is not treated as zero.
 func CheckBar(bar candles.Bar, lim Limits) error {
+	if !bar.SpreadKnown {
+		return fmt.Errorf("%s is missing spread_bps", bar.Symbol)
+	}
+	if bar.SpreadBps < 0 {
+		return fmt.Errorf("%s spread %.2f bps is negative", bar.Symbol, bar.SpreadBps)
+	}
 	if lim.MaxSpreadBps > 0 && bar.SpreadBps > lim.MaxSpreadBps {
 		return fmt.Errorf("%s spread %.2f bps exceeds %.2f", bar.Symbol, bar.SpreadBps, lim.MaxSpreadBps)
 	}

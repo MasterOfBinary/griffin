@@ -23,13 +23,15 @@ make demo
 
 `make demo` is `./bin/griffin demo --once`. It reads `fixtures/synthetic/majors.json`, stores a finished run under `var/griffin`, and exits. That directory is gitignored.
 
-To open the UI after the same replay:
+To open the UI for that same finished run:
 
 ```sh
 ./bin/griffin demo
 ```
 
-The process listens on `127.0.0.1:8787` and refuses any other address, including `localhost` and `0.0.0.0`. Stop it with Ctrl-C.
+That command records the run when it is missing, and serves the stored run when it is already finished. It listens on `127.0.0.1:8787` and refuses any other address, including `localhost` and `0.0.0.0`. The listening line is printed after the socket is bound, and port `0` is reported as the port actually chosen. Stop it with Ctrl-C.
+
+`griffin run` does not assume a mode. Pass `--mode demo`, `--mode signal_only`, or `--mode strict`. `--once` still refuses to recompute a finished id.
 
 ## Modes
 
@@ -44,10 +46,11 @@ The same three labels are printed by the CLI, stored on the run record, and show
 ## Run ids
 
 ```text
-run_id = mode + "-v" + config_version + "-" + hex(first 8 bytes of SHA-256(mode + "\n" + config_version + "\n" + dataset_hash))
+fingerprint = SHA-256(canonical JSON of mode, config_version, quote, universe, cash, fees, slippage, strategy, and safety)
+run_id = mode + "-v" + config_version + "-" + hex(first 8 bytes of SHA-256(mode + "\n" + config_version + "\n" + dataset_hash + "\n" + fingerprint))
 ```
 
-`dataset_hash` is the SHA-256 of the dataset file bytes. The same mode, configuration version, and dataset always produce the same id. Griffin refuses to store that id again after the run is finished. Change the mode, bump `config_version` when settings change, or point `dataset` at a new file to choose a new id.
+`dataset_hash` is the SHA-256 of the dataset file bytes. Listen address and data directory are not part of the id, so the UI can bind another loopback port without minting a new run. Changing mode, any hashed setting, or the dataset bytes changes the id. `--once` refuses to store that id again after the run is finished.
 
 ## Config
 

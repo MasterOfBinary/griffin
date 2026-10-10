@@ -40,6 +40,31 @@ func TestPaperFillsOnNextBar(t *testing.T) {
 	}
 }
 
+func TestFullPositionIncludesFee(t *testing.T) {
+	bars := []candles.Bar{
+		{Symbol: "SOL", Ts: 1, Open: 100, High: 101, Low: 99, Close: 100, Volume: 1},
+		{Symbol: "SOL", Ts: 2, Open: 110, High: 111, Low: 109, Close: 110, Volume: 1},
+	}
+	got, err := Paper(bars, []strategy.Signal{
+		{Symbol: "SOL", Ts: 1, Action: strategy.ActionEnterLong},
+	}, Config{
+		StartingCash: 1000, FeeBps: 10, SlippageBps: 0, MaxPositionPct: 1, AllowFills: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Fills) != 1 {
+		t.Fatalf("fills %+v", got.Fills)
+	}
+	spent := got.Fills[0].Qty*got.Fills[0].Price + got.Fills[0].Fee
+	if spent > 1000+1e-6 {
+		t.Fatalf("spent %v cash %v fill %+v", spent, got.Cash, got.Fills[0])
+	}
+	if got.Cash < -1e-6 {
+		t.Fatalf("cash %v", got.Cash)
+	}
+}
+
 func TestSignalOnlySkipsFills(t *testing.T) {
 	bars := []candles.Bar{
 		{Symbol: "SOL", Ts: 1, Open: 100, High: 101, Low: 99, Close: 100, Volume: 1},

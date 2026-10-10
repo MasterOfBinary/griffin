@@ -1,13 +1,15 @@
 package candles
 
 import (
-	"os"
+	"encoding/json"
 	"path/filepath"
 	"testing"
+
+	"github.com/MasterOfBinary/griffin/internal/repotest"
 )
 
 func TestLoadAndValidateSynthetic(t *testing.T) {
-	ds, err := LoadFile(filepath.Join(repoRoot(t), "fixtures", "synthetic", "majors.json"))
+	ds, err := LoadFile(filepath.Join(repotest.Root(t), "fixtures", "synthetic", "majors.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -23,6 +25,26 @@ func TestLoadAndValidateSynthetic(t *testing.T) {
 	}
 	if err := Covers(bars, []string{"SOL", "BTC", "ETH"}); err != nil {
 		t.Fatal(err)
+	}
+	if !ds.Bars[0].SpreadKnown {
+		t.Fatal("spread_bps was present but not recorded")
+	}
+}
+
+func TestMissingSpreadStaysUnknown(t *testing.T) {
+	var missing Bar
+	if err := json.Unmarshal([]byte(`{"symbol":"SOL","ts":1,"open":1,"high":1,"low":1,"close":1,"volume":1}`), &missing); err != nil {
+		t.Fatal(err)
+	}
+	if missing.SpreadKnown {
+		t.Fatal("missing spread_bps was treated as known")
+	}
+	var zero Bar
+	if err := json.Unmarshal([]byte(`{"symbol":"SOL","ts":1,"open":1,"high":1,"low":1,"close":1,"volume":1,"spread_bps":0}`), &zero); err != nil {
+		t.Fatal(err)
+	}
+	if !zero.SpreadKnown || zero.SpreadBps != 0 {
+		t.Fatalf("%+v", zero)
 	}
 }
 
@@ -40,23 +62,5 @@ func TestRejectsBadOHLC(t *testing.T) {
 	}})
 	if err == nil {
 		t.Fatal("expected ohlc error")
-	}
-}
-
-func repoRoot(t *testing.T) string {
-	t.Helper()
-	dir, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for {
-		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
-			return dir
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			t.Fatal("go.mod not found")
-		}
-		dir = parent
 	}
 }

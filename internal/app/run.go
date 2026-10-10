@@ -12,15 +12,12 @@ import (
 )
 
 // RunOnce loads the dataset, derives the run id, and stores a finished paper run.
-// A second call with the same mode, configuration version, and dataset is refused.
+// A second call with the same id is refused.
 func RunOnce(cfg Config) (store.Run, error) {
 	if err := cfg.Validate(); err != nil {
 		return store.Run{}, err
 	}
-	mode, err := safety.ParseMode(cfg.Mode)
-	if err != nil {
-		return store.Run{}, err
-	}
+	mode := safety.Mode(cfg.Mode)
 	ds, err := candles.LoadFile(cfg.Dataset)
 	if err != nil {
 		return store.Run{}, err
@@ -32,7 +29,7 @@ func RunOnce(cfg Config) (store.Run, error) {
 	if err := candles.Covers(bars, cfg.Universe); err != nil {
 		return store.Run{}, err
 	}
-	id, err := store.RunID(string(mode), cfg.ConfigVersion, ds.Hash)
+	id, err := runID(cfg, ds.Hash)
 	if err != nil {
 		return store.Run{}, err
 	}
@@ -100,6 +97,35 @@ func RunOnce(cfg Config) (store.Run, error) {
 	}
 	if err := st.Finish(run); err != nil {
 		return store.Run{}, err
+	}
+	return run, nil
+}
+
+func runID(cfg Config, datasetHash string) (string, error) {
+	fp, err := cfg.Fingerprint()
+	if err != nil {
+		return "", err
+	}
+	return store.RunID(cfg.Mode, cfg.ConfigVersion, datasetHash, fp)
+}
+
+// finishedRun returns the stored run for this configuration when one exists.
+func finishedRun(cfg Config) (store.Run, error) {
+	ds, err := candles.LoadFile(cfg.Dataset)
+	if err != nil {
+		return store.Run{}, err
+	}
+	id, err := runID(cfg, ds.Hash)
+	if err != nil {
+		return store.Run{}, err
+	}
+	st, err := store.Open(cfg.DataDir)
+	if err != nil {
+		return store.Run{}, err
+	}
+	run, ok := st.Get(id)
+	if !ok || run.Status != store.StatusFinished {
+		return store.Run{}, fmt.Errorf("%w: %s", store.ErrRunFinished, id)
 	}
 	return run, nil
 }

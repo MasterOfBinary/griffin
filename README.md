@@ -16,9 +16,9 @@ make build
 ./bin/griffin demo
 ```
 
-`./bin/griffin demo` replays `fixtures/synthetic/majors.json` and listens on `127.0.0.1:8787`. Any other bind address is refused. `make demo` is the same replay with `--once`, which stores the run and skips the UI.
+`./bin/griffin demo` replays `fixtures/synthetic/majors.json` and listens on `127.0.0.1:8787`. Any other bind address is refused. `make demo` is the same replay with `--once`, which stores the run and skips the UI. Running `./bin/griffin demo` after that opens the UI for the finished run.
 
-A second demo with the same mode, `config_version`, and dataset exits with an error. Bump `config_version`, change mode, or change the dataset file to choose a new run id.
+`./bin/griffin demo --once` a second time is refused. Change mode, configuration, or the dataset to choose a new run id. `griffin run` requires `--mode`.
 
 ```sh
 ./bin/griffin run --mode signal_only --once

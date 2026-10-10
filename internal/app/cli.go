@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/MasterOfBinary/griffin/internal/safety"
 	"github.com/MasterOfBinary/griffin/internal/store"
 	"github.com/MasterOfBinary/griffin/internal/web"
 )
@@ -26,8 +25,10 @@ Modes:
   signal_only  record signals and do not record fills
   strict       record paper fills only when every bar passes the safety gates
 
-Run ids are derived from mode, configuration version, and dataset hash.
-A finished id is refused until one of those inputs changes.
+Run ids are derived from mode, configuration version, dataset hash, and the research settings.
+griffin run requires --mode. A finished id is not recomputed.
+griffin demo serves the UI for a finished demo run instead of refusing it.
+griffin demo --once refuses a second execution of the same id.
 The UI binds to a loopback address only. Names are refused.
 The GitHub default branch for this repository is master.
 `
@@ -73,13 +74,25 @@ func runLabelled(ctx context.Context, args []string, stdout io.Writer, forceMode
 		}
 		return err
 	}
+	if forceMode == "" && opt.mode == "" {
+		return errors.New("griffin run requires --mode demo, signal_only, or strict")
+	}
 	cfg, err := loadAndApply(opt, forceMode)
 	if err != nil {
 		return err
 	}
 	run, err := RunOnce(cfg)
 	if err != nil {
-		return err
+		if opt.once || !errors.Is(err, store.ErrRunFinished) {
+			return err
+		}
+		existing, gerr := finishedRun(cfg)
+		if gerr != nil {
+			return err
+		}
+		fmt.Fprint(stdout, Format(existing))
+		fmt.Fprintln(stdout, "serve: existing finished run")
+		return serveStore(ctx, cfg, stdout)
 	}
 	fmt.Fprint(stdout, Format(run))
 	if opt.once {
@@ -110,8 +123,13 @@ func serveStore(ctx context.Context, cfg Config, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "listening: http://%s\n", cfg.Listen)
-	return web.Serve(ctx, cfg.Listen, web.New(st, cfg.Listen))
+	ln, err := web.Listen(cfg.Listen)
+	if err != nil {
+		return err
+	}
+	bound := ln.Addr().String()
+	fmt.Fprintf(stdout, "listening: http://%s\n", bound)
+	return web.Serve(ctx, ln, web.New(st, bound))
 }
 
 func loadAndApply(opt options, forceMode string) (Config, error) {
@@ -130,13 +148,10 @@ func loadAndApply(opt options, forceMode string) (Config, error) {
 	} else if opt.mode != "" {
 		cfg.Mode = opt.mode
 	}
-	if _, err := safety.ParseMode(cfg.Mode); err != nil {
-		return Config{}, err
-	}
+	cfg.Dataset = resolveExisting(opt.configPath, cfg.Dataset)
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
-	cfg.Dataset = resolveExisting(opt.configPath, cfg.Dataset)
 	return cfg, nil
 }
 

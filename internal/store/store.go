@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"syscall"
 
 	"github.com/MasterOfBinary/griffin/internal/safety"
 	"github.com/MasterOfBinary/griffin/internal/sim"
@@ -16,7 +17,7 @@ import (
 )
 
 // ErrRunFinished is returned when a finished run id is submitted again.
-var ErrRunFinished = errors.New("run is finished; choose a new run id by changing mode, configuration version, or dataset")
+var ErrRunFinished = errors.New("run is finished; choose a new run id by changing mode, configuration, or dataset")
 
 // StatusFinished is the only terminal status. A finished id cannot be reused.
 const StatusFinished = "finished"
@@ -63,24 +64,17 @@ func Open(dir string) (*Store, error) {
 	}
 	path := filepath.Join(dir, "runs.json")
 	s := &Store{path: path, runs: map[string]Run{}}
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return s, nil
-		}
-		return nil, fmt.Errorf("read store: %w", err)
-	}
-	if safety.ContainsKeyMaterial(string(raw)) {
-		return nil, fmt.Errorf("store file contains key material and will not be loaded")
-	}
-	var doc fileDoc
-	if err := json.Unmarshal(raw, &doc); err != nil {
-		return nil, fmt.Errorf("parse store: %w", err)
-	}
-	for _, run := range doc.Runs {
-		s.runs[run.ID] = run
+	if err := s.reloadFromDisk(); err != nil {
+		return nil, err
 	}
 	return s, nil
+}
+
+// Reload re-reads runs.json so a long-lived UI sees runs written after startup.
+func (s *Store) Reload() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.reloadFromDisk()
 }
 
 // Get returns a run by id.
@@ -120,11 +114,61 @@ func (s *Store) Finish(run Run) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if prev, ok := s.runs[run.ID]; ok && prev.Status == StatusFinished {
-		return fmt.Errorf("%w: %s", ErrRunFinished, run.ID)
+	return s.withFileLock(func() error {
+		if err := s.reloadFromDisk(); err != nil {
+			return err
+		}
+		if prev, ok := s.runs[run.ID]; ok && prev.Status == StatusFinished {
+			return fmt.Errorf("%w: %s", ErrRunFinished, run.ID)
+		}
+		s.runs[run.ID] = run
+		return s.writeLocked()
+	})
+}
+
+func (s *Store) withFileLock(fn func() error) error {
+	f, err := os.OpenFile(s.path+".lock", os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return fmt.Errorf("open store lock: %w", err)
 	}
-	s.runs[run.ID] = run
-	return s.writeLocked()
+	defer f.Close()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		return fmt.Errorf("lock store: %w", err)
+	}
+	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	return fn()
+}
+
+func (s *Store) reloadFromDisk() error {
+	raw, err := os.ReadFile(s.path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			s.runs = map[string]Run{}
+			return nil
+		}
+		return fmt.Errorf("read store: %w", err)
+	}
+	runs, err := parseRuns(raw)
+	if err != nil {
+		return err
+	}
+	s.runs = runs
+	return nil
+}
+
+func parseRuns(raw []byte) (map[string]Run, error) {
+	if safety.ContainsKeyMaterial(string(raw)) {
+		return nil, fmt.Errorf("store file contains key material and will not be loaded")
+	}
+	var doc fileDoc
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return nil, fmt.Errorf("parse store: %w", err)
+	}
+	runs := make(map[string]Run, len(doc.Runs))
+	for _, run := range doc.Runs {
+		runs[run.ID] = run
+	}
+	return runs, nil
 }
 
 func (s *Store) writeLocked() error {
@@ -141,12 +185,27 @@ func (s *Store) writeLocked() error {
 	if safety.ContainsKeyMaterial(string(raw)) {
 		return fmt.Errorf("refusing to store key material")
 	}
-	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o644); err != nil {
+	tmp, err := os.CreateTemp(filepath.Dir(s.path), ".runs-*.json")
+	if err != nil {
+		return fmt.Errorf("create store temp: %w", err)
+	}
+	tmpName := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if _, err := tmp.Write(raw); err != nil {
+		_ = tmp.Close()
 		return fmt.Errorf("write store: %w", err)
 	}
-	if err := os.Rename(tmp, s.path); err != nil {
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close store temp: %w", err)
+	}
+	if err := os.Rename(tmpName, s.path); err != nil {
 		return fmt.Errorf("commit store: %w", err)
 	}
+	cleanup = false
 	return nil
 }
